@@ -2,24 +2,20 @@ import streamlit as st
 import pdfplumber
 import json
 import requests
+import re
+import os
 
-USE_OLLAMA = True
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_URL = f"{OLLAMA_HOST}/api/generate"
+OLLAMA_MODEL = "gemma2:2b"
 OLLAMA_AVAILABLE = False
 
-if USE_OLLAMA:
-    OLLAMA_URL = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "gemma2:2b"
-    try:
-        test_response = requests.get("http://localhost:11434/api/tags", timeout=2)
-        if test_response.status_code == 200:
-            OLLAMA_AVAILABLE = True
-    except:
-        pass
-else:
-    import google.generativeai as genai
-    API_KEY = "AIzaSyA1gb1kvisI4ogOdjppQ_jdK5UfIQ-Yg_A"
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel("models/gemini-pro-latest")
+try:
+    test_response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=2)
+    if test_response.status_code == 200:
+        OLLAMA_AVAILABLE = True
+except:
+    pass
 
 st.set_page_config(page_title="Generator Test PDF", layout="centered", page_icon="📚")
 
@@ -70,8 +66,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Generator de Test din PDF")
-st.markdown("<p style='text-align: center; color: #666;'>Încarcă un PDF și generează un test grilă personalizat</p>", unsafe_allow_html=True)
+st.title("📚 Quick-Quizzes")
 
 if 'questions' not in st.session_state:
     st.session_state.questions = None
@@ -90,7 +85,6 @@ difficulty = st.selectbox(
 )
 
 def extract_text_from_pdf(pdf_file):
-    """Extrage textul dintr-un fișier PDF."""
     text = ""
     try:
         with pdfplumber.open(pdf_file) as pdf:
@@ -144,7 +138,18 @@ def _parse_ollama_response(response):
         json_end = result_text.rfind(']') + 1
         if json_start != -1 and json_end > json_start:
             json_str = result_text[json_start:json_end]
-            json_data = json.loads(json_str)
+            try:
+                json_data = json.loads(json_str)
+            except json.JSONDecodeError:
+                json_matches = re.findall(r'\[.*?\]', result_text, re.DOTALL)
+                for match in reversed(json_matches):
+                    try:
+                        json_data = json.loads(match)
+                        break
+                    except:
+                        continue
+                else:
+                    raise ValueError("Could not parse JSON array from response")
         elif result_text.strip().startswith('{'):
             json_data = json.loads(result_text)
         else:
@@ -159,40 +164,7 @@ def _parse_ollama_response(response):
     
     return _normalize_questions(questions)
 
-def generate_test_from_text(text, dificultate, max_retries=3):
-    """Generează test grilă folosind LLM sau fallback mock."""
-    prompt = f"""Ești un profesor universitar. Bazează-te STRICT pe textul furnizat pentru a genera un test grilă cu 5 întrebări de dificultate {dificultate}. Fiecare întrebare trebuie să aibă 4 variante de răspuns, din care doar una este corectă.
-
-Textul pentru referință:
-{text}
-
-Returnează rezultatul STRICT în format JSON, ca o listă de obiecte. Fiecare obiect trebuie să aibă cheile: 'intrebare', 'variante_raspuns' (lista de 4 string-uri), 'raspuns_corect' (string) și 'explicatie'."""
-    
-    if USE_OLLAMA and OLLAMA_AVAILABLE:
-        try:
-            response = requests.post(OLLAMA_URL, json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.7
-            }, timeout=60)
-            if response.status_code == 200:
-                try:
-                    result = _parse_ollama_response(response)
-                    if result:
-                        return result
-                except Exception as parse_error:
-                    st.warning(f"Eroare la parsarea răspunsului: {parse_error}. Folosesc test mock.")
-            else:
-                st.warning(f"Ollama a returnat cod {response.status_code}. Folosesc test mock.")
-        except requests.exceptions.Timeout:
-            st.warning("Ollama a depășit timpul de răspuns (60s). Folosesc test mock.")
-        except requests.exceptions.ConnectionError:
-            st.warning("Nu se poate conecta la Ollama. Verifică dacă serverul rulează. Folosesc test mock.")
-        except Exception as e:
-            st.warning(f"Eroare Ollama: {e}. Folosesc test mock.")
-    
-    st.info("Folosesc test de testare mock. Pentru test real, instalează Ollama sau activează Gemini API.")
+def generate_mock_test():
     return [
         {
             "intrebare": "Ce informație conține PDF-ul?",
@@ -225,6 +197,41 @@ Returnează rezultatul STRICT în format JSON, ca o listă de obiecte. Fiecare o
             "explicatie": "PDF este acronim pentru Portable Document Format, creat de Adobe."
         }
     ]
+
+def generate_test_from_text(text, dificultate, max_retries=3):
+    prompt = f"""Ești un profesor universitar. Bazează-te STRICT pe textul furnizat pentru a genera un test grilă cu 5 întrebări de dificultate {dificultate}. Fiecare întrebare trebuie să aibă 4 variante de răspuns, din care doar una este corectă.
+
+Textul pentru referință:
+{text}
+
+Returnează rezultatul STRICT în format JSON, ca o listă de obiecte. Fiecare obiect trebuie să aibă cheile: 'intrebare', 'variante_raspuns' (lista de 4 string-uri), 'raspuns_corect' (string) și 'explicatie'."""
+    
+    if OLLAMA_AVAILABLE:
+        try:
+            response = requests.post(OLLAMA_URL, json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "temperature": 0.7
+            }, timeout=120)
+            if response.status_code == 200:
+                try:
+                    result = _parse_ollama_response(response)
+                    if result:
+                        return result
+                except Exception as parse_error:
+                    st.warning(f"Eroare la parsarea răspunsului: {parse_error}. Folosesc test mock.")
+            else:
+                st.warning(f"Ollama a returnat cod {response.status_code}. Folosesc test mock.")
+        except requests.exceptions.Timeout:
+            st.warning("Ollama a depășit timpul de răspuns (120s). Folosesc test mock.")
+        except requests.exceptions.ConnectionError:
+            st.warning("Nu se poate conecta la Ollama. Verifică dacă serverul rulează. Folosesc test mock.")
+        except Exception as e:
+            st.warning(f"Eroare Ollama: {e}. Folosesc test mock.")
+    
+    st.info("Folosesc test mock. Pentru test real, asigură-te că Ollama rulează.")
+    return generate_mock_test()
 
 if st.button("Generează Test", type="primary"):
     st.session_state.submitted = False
